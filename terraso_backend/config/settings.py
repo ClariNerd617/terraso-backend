@@ -215,7 +215,7 @@ LOGGING = {
         },
         "plain_console": {
             "()": structlog.stdlib.ProcessorFormatter,
-            "processor": structlog.dev.ConsoleRenderer(),
+            "processor": structlog.dev.ConsoleRenderer(sort_keys=False),
         },
     },
     "filters": {
@@ -258,6 +258,9 @@ structlog.configure(
     wrapper_class=structlog.stdlib.BoundLogger,
     cache_logger_on_first_use=True,
 )
+
+# See .env.sample for description of the log levels
+GRAPHQL_LOG_LEVEL = config("GRAPHQL_LOG_LEVEL", default="names")
 
 GRAPHENE = {
     "SCHEMA": "apps.graphql.schema.schema.schema",
@@ -460,3 +463,5 @@ HUBSPOT_ACCOUNT_DELETION_FORM_API_URL = (
 GLOBAL_SOIL_ID_BUFFER_DISTANCE = config(
     "GLOBAL_SOIL_ID_BUFFER_DISTANCE", default="30000", cast=config.eval
 )
+
+import config.graphql_log  # noqa: E402, F401 — registers django_structlog signal receivers
