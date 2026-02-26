@@ -13,9 +13,17 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see https://www.gnu.org/licenses/.
 
+import csv
+import os
+
+import structlog
 from django.conf import settings
 
 from apps.graphql.schema.schema import schema
+
+from .depth_helpers import depth_key, get_visible_intervals
+
+logger = structlog.get_logger(__name__)
 
 # In-memory cache for soil_id data, used to avoid external API calls during tests.
 # Keyed by site ID (string UUID).
@@ -23,6 +31,81 @@ _soil_id_cache = {}
 
 # Set to False to disable cache (for development/testing without cache)
 _USE_SOIL_ID_CACHE = True
+
+# Munsell-to-CIELAB lookup table, loaded lazily from the soil-id data files.
+# Keyed by (hue_string, value_int, chroma_int) -> (L, A, B)
+_munsell_lab_table = None
+
+# Hue letter names in order, matching the app's colorHue (0-100) encoding
+_HUE_NAMES = ["R", "YR", "Y", "GY", "G", "BG", "B", "PB", "P", "RP"]
+
+
+def _load_munsell_lab_table():
+    """Load the Munsell-to-CIELAB lookup table from the soil-id data files."""
+    global _munsell_lab_table
+    if _munsell_lab_table is not None:
+        return _munsell_lab_table
+
+    try:
+        from soil_id.config import MUNSELL_RGB_LAB_PATH
+
+        path = MUNSELL_RGB_LAB_PATH
+    except ImportError:
+        path = os.path.join(os.environ.get("DATA_PATH", "Data"), "LandPKS_munsell_rgb_lab.csv")
+
+    table = {}
+    try:
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                hue = row["hue"]
+                value = int(row["value"])
+                chroma = int(row["chroma"])
+                table[(hue, value, chroma)] = (
+                    float(row["cielab_l"]),
+                    float(row["cielab_a"]),
+                    float(row["cielab_b"]),
+                )
+    except FileNotFoundError:
+        logger.warning("Munsell-to-LAB lookup table not found", path=path)
+        table = {}
+
+    _munsell_lab_table = table
+    return _munsell_lab_table
+
+
+def munsell_to_lab(color_hue, color_value, color_chroma):
+    """Convert app colorHue/colorValue/colorChroma to CIELAB using the lookup table.
+
+    Returns (L, A, B) tuple, or None if the color can't be looked up.
+    """
+    table = _load_munsell_lab_table()
+    if not table:
+        return None
+
+    chroma = round(color_chroma)
+    value = round(color_value)
+
+    # Neutral color (chroma == 0)
+    if chroma == 0:
+        result = table.get(("N", value, 0))
+        return result
+
+    # Decode colorHue (0-100 continuous) to Munsell hue string
+    hue = color_hue
+    if hue == 100:
+        hue = 0
+
+    hue_index = int(hue // 10)
+    substep = round((hue % 10) / 2.5)
+
+    if substep == 0:
+        hue_index = (hue_index + 9) % 10
+        substep = 4
+
+    substep = (substep * 5) / 2
+    hue_str = f"{substep:g}{_HUE_NAMES[hue_index]}"
+
+    return table.get((hue_str, value, chroma))
 
 
 def set_soil_id_cache_enabled(enabled):
@@ -214,39 +297,45 @@ def fetch_soil_id(site, request):
         "depthDependentData": [],
     }
 
-    # Process depth intervals and depth-dependent data
-    depth_intervals = soil_data.get("depthIntervals", [])
-    depth_dependent_data = soil_data.get("depthDependentData", [])
+    # Filter depth-dependent data to only include visible intervals.
+    # This uses the same logic as the CSV/JSON export (process_depth_data),
+    # respecting the effective preset (project overrides site).
+    visible_keys = {depth_key(interval) for interval, _ in get_visible_intervals(site)}
+    measurements = soil_data.get("depthDependentData", [])
 
-    for interval, depth_data in zip(depth_intervals, depth_dependent_data):
+    for measurement in measurements:
+        if depth_key(measurement) not in visible_keys:
+            continue
+
+        di = measurement.get("depthInterval", {})
         depth_entry = {
             "depthInterval": {
-                "start": interval.get("depthInterval", {}).get("start"),
-                "end": interval.get("depthInterval", {}).get("end"),
+                "start": di.get("start"),
+                "end": di.get("end"),
             }
         }
 
         # Add texture if available
-        if depth_data.get("texture"):
-            depth_entry["texture"] = depth_data["texture"]
+        if measurement.get("texture"):
+            depth_entry["texture"] = measurement["texture"]
 
         # Add rock fragment volume if available
-        if depth_data.get("rockFragmentVolume"):
-            depth_entry["rockFragmentVolume"] = depth_data["rockFragmentVolume"]
+        if measurement.get("rockFragmentVolume"):
+            depth_entry["rockFragmentVolume"] = measurement["rockFragmentVolume"]
 
         # Convert Munsell color to LAB color if available
         if (
-            depth_data.get("colorHue") is not None
-            and depth_data.get("colorValue") is not None
-            and depth_data.get("colorChroma") is not None
+            measurement.get("colorHue") is not None
+            and measurement.get("colorValue") is not None
+            and measurement.get("colorChroma") is not None
         ):
-            # For now, we'll use placeholder LAB values
-            # In a real implementation, you'd convert Munsell to LAB
-            depth_entry["colorLAB"] = {
-                "L": depth_data.get("colorValue", 0) * 10,  # Rough conversion
-                "A": 0.0,  # Placeholder
-                "B": depth_data.get("colorChroma", 0) * 2,  # Rough conversion
-            }
+            lab = munsell_to_lab(
+                measurement["colorHue"],
+                measurement["colorValue"],
+                measurement["colorChroma"],
+            )
+            if lab:
+                depth_entry["colorLAB"] = {"L": lab[0], "A": lab[1], "B": lab[2]}
 
         data["depthDependentData"].append(depth_entry)
 
