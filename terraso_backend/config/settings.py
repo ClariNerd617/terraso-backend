@@ -14,6 +14,7 @@
 # along with this program. If not, see https://www.gnu.org/licenses/.
 import base64
 import os
+import re
 from typing import TypedDict
 
 import django
@@ -22,6 +23,7 @@ import structlog
 from dj_database_url import parse as parse_db_url
 from django.utils.encoding import force_str
 from django.utils.translation import gettext_lazy as _
+from django.views.debug import SafeExceptionReporterFilter
 from prettyconf import config
 
 # Monkey patching force_text function to make the application work with Django
@@ -37,6 +39,21 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(BASE_DIR))
 ENV = config("ENV", default="development")
 
 DEBUG = config("DEBUG", default=False, cast=config.boolean)
+if ENV != "development":
+    DEBUG = False
+
+
+# Extend Django's default hidden_settings to also redact DATABASE_URL (which contains
+# passwords) in error pages. Uses subclass + DEFAULT_EXCEPTION_REPORTER_FILTER per
+# https://docs.djangoproject.com/en/6.0/howto/error-reporting/#custom-error-reports
+class TerrasoExceptionReporterFilter(SafeExceptionReporterFilter):
+    hidden_settings = re.compile(
+        SafeExceptionReporterFilter.hidden_settings.pattern + r"|DATABASE_URL|DATABASES",
+        re.IGNORECASE,
+    )
+
+
+DEFAULT_EXCEPTION_REPORTER_FILTER = "config.settings.TerrasoExceptionReporterFilter"
 
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="*", cast=config.list)
 CSRF_TRUSTED_ORIGINS = config(
@@ -128,16 +145,17 @@ LOCALE_PATHS = (os.path.join(BASE_DIR, "locale"),)
 WSGI_APPLICATION = "config.wsgi.application"
 
 default_dburl = "sqlite:///" + os.path.join(BASE_DIR, "db.sqlite3")
-PRIMARY_DATABASE_URL = config("DATABASE_URL", default=default_dburl)
-SOIL_ID_DATABASE_URL = config("SOIL_ID_DATABASE_URL", default=PRIMARY_DATABASE_URL)
+_primary_db_url = config("DATABASE_URL", default=default_dburl)
+SOIL_ID_DATABASE_URL = config("SOIL_ID_DATABASE_URL", default=_primary_db_url)
 
 DATABASES = {
     "default": {
-        **parse_db_url(PRIMARY_DATABASE_URL),
+        **parse_db_url(_primary_db_url),
         "CONN_MAX_AGE": int(config("CONN_MAX_AGE", default="600")),
         "CONN_HEALTH_CHECKS": True,
     },
 }
+del _primary_db_url
 
 AUTHENTICATION_BACKENDS = (
     "rules.permissions.ObjectPermissionBackend",

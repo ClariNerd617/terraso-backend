@@ -21,6 +21,7 @@ from typing import Optional
 import psycopg
 import structlog
 from config.settings import GLOBAL_SOIL_ID_BUFFER_DISTANCE, SOIL_ID_DATABASE_URL
+from django.views.decorators.debug import sensitive_variables
 from soil_id import global_soil, us_soil
 from soil_id.utils import find_region_for_location
 
@@ -51,6 +52,7 @@ logger = structlog.get_logger(__name__)
 _soil_id_thread_local = threading.local()
 
 
+@sensitive_variables()
 def soil_id_database_connection():
     conn = getattr(_soil_id_thread_local, "connection", None)
     if conn is None or conn.closed:
