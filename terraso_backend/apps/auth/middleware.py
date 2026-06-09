@@ -22,9 +22,13 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.http.response import JsonResponse
 from django.urls import reverse
-from jwt.exceptions import InvalidTokenError
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 
-from .constants import OAUTH_COOKIE_MAX_AGE_SECONDS, OAUTH_COOKIE_NAME
+from .constants import (
+    OAUTH_COOKIE_MAX_AGE_SECONDS,
+    OAUTH_COOKIE_NAME,
+    SESSION_FLAG_OAUTH_LOGIN,
+)
 from .services import JWTService
 
 logger = structlog.get_logger(__name__)
@@ -35,6 +39,18 @@ class JWTAuthenticationMiddleware:
     def process_view(self, request, view_func, view_args, view_kwargs):
         auth_optional = getattr(view_func, "auth_optional", False)
         auth_required = not auth_optional and not self._is_path_public(request.path)
+
+        # JWT is the source of truth for API endpoints. A Django session cookie
+        # (created by the OAuth /authorize flow and retained by clients like
+        # iOS CFNetwork) must not be allowed to authenticate API requests.
+        # AuthenticationMiddleware ran earlier and may have set request.user
+        # from the session; reset it on any non-public path so the JWT layer
+        # below is the only acceptable credential.  Paths in PUBLIC_BASE_PATHS
+        # (/admin/, /oauth/, /auth/, /healthz/, ...) keep their current
+        # session-based behavior because both auth_optional and auth_required
+        # are false for them.
+        if auth_optional or auth_required:
+            request.user = AnonymousUser()
 
         if request.user.is_authenticated or (not auth_required and not auth_optional):
             return None
@@ -86,6 +102,10 @@ class JWTAuthenticationMiddleware:
 
         try:
             decoded_payload = JWTService().verify_access_token(token)
+        except ExpiredSignatureError as e:
+            # Expected: clients refresh via /auth/tokens and retry.
+            logger.info("JWT access token expired")
+            raise ValidationError(f"Invalid JWT token: {e}")
         except InvalidTokenError as e:
             logger.exception("Failure to verify JWT token", extra={"token": token})
             raise ValidationError(f"Invalid JWT token: {e}")
@@ -124,21 +144,42 @@ class OAuthAuthorizeState:
     def __call__(self, request):
         response = self.get_response(request)
 
-        if request.path == self.uri_path and request.user.is_anonymous:
-            # user accessing OAuth authorize URI and not logged in
-            # we store the URL so OAuth can start after login
-            cookie = request.get_full_path_info()
+        if request.path == self.uri_path:
+            if request.user.is_anonymous:
+                # user accessing OAuth authorize URI and not logged in
+                # we store the URL so OAuth can start after login
+                cookie = request.get_full_path_info()
 
-            response.set_signed_cookie(
-                OAUTH_COOKIE_NAME,
-                cookie,
-                domain=settings.AUTH_COOKIE_DOMAIN,
-                max_age=OAUTH_COOKIE_MAX_AGE_SECONDS,
-                httponly=True,
-                secure=True,
-                # lax - cookie sent from requests not originating from our domain
-                # need this for the oauth flow b/c request coming from third party
-                samesite="Lax",
-            )
+                response.set_signed_cookie(
+                    OAUTH_COOKIE_NAME,
+                    cookie,
+                    domain=settings.AUTH_COOKIE_DOMAIN,
+                    max_age=OAUTH_COOKIE_MAX_AGE_SECONDS,
+                    httponly=True,
+                    secure=True,
+                    # lax - cookie sent from requests not originating from our domain
+                    # need this for the oauth flow b/c request coming from third party
+                    samesite="Lax",
+                )
+            elif request.session.get(SESSION_FLAG_OAUTH_LOGIN) and self._is_grant_redirect(
+                response
+            ):
+                # The OAuth grant has been emitted; the user-agent is leaving
+                # the authorize flow with an auth code. The Django session
+                # that round-tripped them through /oauth/authorize has no
+                # further purpose and would otherwise persist for the
+                # default SESSION_COOKIE_AGE (14d). Flush it so the cookie
+                # doesn't linger past its reason to exist.
+                request.session.flush()
 
         return response
+
+    @staticmethod
+    def _is_grant_redirect(response):
+        """A 30x to the OAuth client's redirect_uri carrying a `code` (auth
+        code flow) or `id_token` (implicit/hybrid flow) is the signal that
+        the grant succeeded. Error redirects use `error=` and are ignored."""
+        if response.status_code not in (301, 302):
+            return False
+        location = response.get("Location", "")
+        return "code=" in location or "id_token=" in location
