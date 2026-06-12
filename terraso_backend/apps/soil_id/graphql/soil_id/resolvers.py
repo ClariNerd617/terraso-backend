@@ -150,15 +150,26 @@ def resolve_soil_info(soil_match: dict):
 
     taxonomy_subgroup = site_data["taxsubgrp"] if "taxsubgrp" in site_data else None
     full_description_url = site_data["sdeURL"] if "sdeURL" in site_data else None
-    description = soil_match["site"]["siteDescription"]
-    if not isinstance(description, str):
-        description = None
+
+    # siteDescription is a plain string for US matches (the soil series narrative)
+    # and a multilingual dict for global (WRB) matches. Expose the English text in
+    # both cases, plus the separate management guidance that global matches carry.
+    raw_description = soil_match["site"]["siteDescription"]
+    if isinstance(raw_description, dict):
+        description = raw_description.get("Description_en") or None
+        management = raw_description.get("Management_en") or None
+    elif isinstance(raw_description, str):
+        description = raw_description or None
+        management = None
+    else:
+        description = management = None
 
     return SoilInfo(
         soil_series=SoilSeries(
             name=soil_id["component"],
             taxonomy_subgroup=taxonomy_subgroup,
             description=description,
+            management=management,
             full_description_url=full_description_url,
         ),
         land_capability_class=resolve_land_capability_class(site_data),
