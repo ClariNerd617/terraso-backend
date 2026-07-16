@@ -73,10 +73,10 @@ def test_query_site_fields(client, project, project_user):
         assert site_json["elevation"] == site.elevation
         assert site_json["privacy"] == site.privacy
         assert site_json["archived"] == site.archived
-        if site_json["owner"] is None:
-            assert site.owner is None
+        if site.owner is None:
+            assert site_json["owner"] is None
         else:
-            assert site.owner is not None and site_json["owner"]["id"] == str(site.owner.id)
+            assert site_json["owner"]["id"] == str(site.owner.id)
         if site_json["project"] is None:
             assert site.project is None
         else:

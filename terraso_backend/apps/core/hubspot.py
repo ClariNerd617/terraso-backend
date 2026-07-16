@@ -21,12 +21,44 @@ from django.conf import settings
 logger = structlog.get_logger(__name__)
 
 
+def _normalize_env(env):
+    """Map settings.ENV → one of HubSpot's `environment` radio values
+    (`production` / `staging` / `dev` / `unknown`). Any value HubSpot
+    doesn't recognize would be rejected by the form's radio validation,
+    so we normalize on our side and fall back to `unknown`."""
+    normalized = (env or "").lower()
+    if normalized == "production":
+        return "PROD"
+    if normalized == "staging":
+        return "STAGING"
+    if normalized in ("development", "dev", "local"):
+        return "DEV"
+    return "?"
+
+
 def create_account_deletion_ticket(user):
+    """Open a HubSpot ticket asking support to delete the user's account.
+
+    Support runs `python manage.py show_deletion_blockers <email>` to see
+    what data is blocking automated deletion for this user.
+    """
     if not user or not user.email:
         return False
 
+    environment = _normalize_env(settings.ENV)
     subject = f"Deletion request for {user.email}"
-    body = f"LandPKS account deletion request:\nName: {user.full_name()}\nEmail: {user.email}"
+    body_lines = [
+        f"[{environment}] LandPKS account deletion request:",
+        f"Name: {user.full_name()}",
+        f"Email: {user.email}",
+    ]
+    body = "\n".join(body_lines)
+
+    if settings.HUBSPOT_DRY_RUN:
+        logger.info("HubSpot dry-run: skipping ticket creation", subject=subject, body=body)
+        return True
+    else:
+        logger.info("Creating HubSpot ticket", subject=subject, body=body)
 
     headers = {"Content-type": "application/json", "Authorization": settings.HUBSPOT_AUTH_TOKEN}
     data = {

@@ -36,7 +36,12 @@ def test_groups_membership_is_created_when_group_member_added():
     assert CollaborationMembership.objects.count() == 3
 
 
-def test_groups_membership_is_deleted_when_user_is_deleted():
+def test_groups_membership_blocks_user_deletion():
+    """An APPROVED non-project Membership blocks user soft-deletion
+    (Group/Landscape membership is undeletable web data; the membership
+    has to be cleaned up manually before the user can be deleted)."""
+    from django.core.exceptions import ValidationError
+
     user = mixer.blend(User)
     group = mixer.blend(Group)
 
@@ -44,13 +49,10 @@ def test_groups_membership_is_deleted_when_user_is_deleted():
         user.email, group_collaboration_roles.ROLE_MEMBER, CollaborationMembership.APPROVED
     )
 
-    membership = CollaborationMembership.objects.get(user=user, membership_list__group=group)
+    with pytest.raises(ValidationError, match="undeletable data"):
+        user.delete()
 
-    assert membership
-
-    user.delete()
-
-    assert not User.objects.filter(id=user.id).exists()
-    assert not CollaborationMembership.objects.filter(
-        user=user, membership_list__group=group
-    ).exists()
+    # User is still active; membership still in place.
+    user.refresh_from_db()
+    assert user.deleted_at is None
+    assert CollaborationMembership.objects.filter(user=user, membership_list__group=group).exists()

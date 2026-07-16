@@ -30,8 +30,10 @@ class Site(BaseModel):
         abstract = False
         constraints = [
             models.CheckConstraint(
-                condition=(models.Q(project__isnull=False) | models.Q(owner__isnull=False))
-                & (models.Q(project__isnull=True) | models.Q(owner__isnull=True)),
+                condition=(
+                    (models.Q(project__isnull=False) | models.Q(owner__isnull=False))
+                    & (models.Q(project__isnull=True) | models.Q(owner__isnull=True))
+                ),
                 name="site_must_be_owned_once",
             )
         ]
@@ -46,7 +48,7 @@ class Site(BaseModel):
         User,
         null=True,
         blank=True,
-        on_delete=models.RESTRICT,
+        on_delete=models.CASCADE,
         verbose_name="owner to which the site belongs",
     )
 

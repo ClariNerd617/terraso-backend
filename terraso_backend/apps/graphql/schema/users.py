@@ -16,6 +16,7 @@
 import graphene
 import rules
 import structlog
+from django.utils import timezone
 from django_filters import CharFilter, FilterSet
 from graphene import relay
 from graphene_django import DjangoObjectType
@@ -23,9 +24,14 @@ from graphene_django import DjangoObjectType
 from apps.auth.services import JWTService
 from apps.collaboration.models import Membership
 from apps.core import analytics
-from apps.core.hubspot import create_account_deletion_ticket
 from apps.core.models import User, UserPreference
-from apps.core.models.users import USER_PREFS_KEY_ACCOUNT_DELETION, USER_PREFS_KEYS
+from apps.core.models.users import (
+    USER_PREFS_KEY_ACCOUNT_DELETION,
+    USER_PREFS_KEYS,
+    TicketCreationError,
+    UserDeletionBlockedError,
+    request_account_deletion,
+)
 from apps.graphql.exceptions import GraphQLNotAllowedException
 
 from .commons import (
@@ -247,15 +253,40 @@ class UserDeleteMutation(BaseDeleteMutation):
                 model_name=User.__name__, operation=MutationTypes.DELETE
             )
 
-        result = super().mutate_and_get_payload(root, info, **kwargs)
+        # Catch only when there are deletion blockers (and fall back to
+        # manual-cleanup ticket). Other exceptions (DB errors, cascade bugs)
+        # carry no such guarantee and surface honestly so Sentry catches them.
+        user = User.objects.get(pk=_id)
 
-        analytics.capture(
-            distinct_id=_id,
-            event="user_deleted",
-            set_props=analytics.user_person_properties(request_user),
-        )
+        account_age_days = (timezone.now() - user.created_at).days
+        try:
+            user.delete()
+            analytics.capture(
+                distinct_id=_id,
+                event="user_delete_immediate",
+                properties={"account_age_days": account_age_days},
+                set_props=analytics.user_person_properties(request_user),
+            )
+        except UserDeletionBlockedError:
+            try:
+                request_account_deletion(user)
+                analytics.capture(
+                    distinct_id=_id,
+                    event="user_delete_request",
+                    properties={"account_age_days": account_age_days},
+                    set_props=analytics.user_person_properties(request_user),
+                )
 
-        return result
+            except TicketCreationError as ticket_err:
+                analytics.capture(
+                    distinct_id=_id,
+                    event="user_delete_request_failed",
+                    properties={"account_age_days": account_age_days},
+                    set_props=analytics.user_person_properties(request_user),
+                )
+                return cls(user=None, errors=[{"message": str(ticket_err)}])
+            return cls(user=None)
+        return cls(user=user)
 
 
 class UserPreferenceUpdate(BaseAuthenticatedMutation):
@@ -296,15 +327,21 @@ class UserPreferenceUpdate(BaseAuthenticatedMutation):
             )
 
         previous_value = preference.value
-        preference.value = value
-        preference.save()
-
-        if (
+        new_deletion_request = (
             key == USER_PREFS_KEY_ACCOUNT_DELETION
             and previous_value.lower() != "true"
             and value.lower() == "true"
-        ):
-            create_account_deletion_ticket(user)
+        )
+
+        if new_deletion_request:
+            # Helper handles ordering + idempotence; raises on HubSpot failure
+            # so the pref stays "false" and the user can retry (behavior change
+            # from the prior silent-log-and-save).
+            request_account_deletion(user)
+            preference = UserPreference.objects.get(user_id=user.id, key=key)
+        else:
+            preference.value = value
+            preference.save()
 
         return cls(preference=preference)
 

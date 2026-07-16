@@ -1,4 +1,4 @@
-# Copyright © 2023 Technology Matters
+# Copyright © 2026 Technology Matters
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
@@ -13,16 +13,26 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see https://www.gnu.org/licenses/.
 
-from .projects import Project, ProjectMembership, ProjectMembershipList
-from .site_notes import SiteNote
-from .site_push_history import SitePushHistory
-from .sites import Site
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
 
-__all__ = [
-    "Project",
-    "ProjectMembership",
-    "ProjectMembershipList",
-    "Site",
-    "SiteNote",
-    "SitePushHistory",
-]
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("story_map", "0008_storymap_featured"),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+    ]
+
+    operations = [
+        migrations.AlterField(
+            model_name="storymap",
+            name="created_by",
+            field=models.ForeignKey(
+                null=True,
+                on_delete=django.db.models.deletion.PROTECT,
+                to=settings.AUTH_USER_MODEL,
+            ),
+        ),
+    ]

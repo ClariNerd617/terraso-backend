@@ -19,6 +19,7 @@ from django import forms
 from django.conf import settings
 from django.contrib import admin
 from django.utils.html import format_html
+from safedelete.admin import SafeDeleteAdmin, SafeDeleteAdminFilter, highlight_deleted
 
 from .models import StoryMap
 
@@ -74,11 +75,11 @@ class CustomStoryMapForm(forms.ModelForm):
 
 
 @admin.register(StoryMap)
-class StoryMapAdmin(admin.ModelAdmin):
+class StoryMapAdmin(SafeDeleteAdmin):
     config_readonly_fields = ("configuration", "published_configuration")
     readonly_fields = ("web_client_preview",)
-    list_display = ("story_map_name", "owner", "is_published", "published_at")
-    list_filter = ("is_published",)
+    list_display = (highlight_deleted, "story_map_name", "owner", "is_published", "published_at")
+    list_filter = ("is_published", SafeDeleteAdminFilter)
     list_select_related = ("created_by",)
     search_fields = (
         "title",
