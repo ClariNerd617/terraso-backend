@@ -141,16 +141,22 @@ class StoryMapNode(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        user_pk = getattr(info.context.user, "pk", False)
+        return get_visible_story_maps_queryset(queryset, info)
 
-        base_query = Q(is_published=True) | Q(created_by=user_pk)
-        membership_query = (
-            Q(membership_list__memberships__user=user_pk) if user_pk is not None else Q()
-        )
 
-        final_query = base_query | membership_query
+def get_visible_story_maps_queryset(queryset, info):
+    user_pk = getattr(info.context.user, "pk", False)
 
-        return queryset.filter(final_query).distinct()
+    base_query = Q(is_published=True) | Q(created_by=user_pk)
+    membership_query = Q(membership_list__memberships__user=user_pk) if user_pk is not None else Q()
+
+    final_query = base_query | membership_query
+
+    return queryset.filter(final_query).distinct()
+
+
+def resolve_featured_story_maps_random(info, *, first):
+    return StoryMap.objects.filter(is_published=True, featured=True).order_by("?")[:first]
 
 
 class StoryMapDeleteMutation(BaseDeleteMutation):
